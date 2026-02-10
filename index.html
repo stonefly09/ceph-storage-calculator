@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>Ceph Storage Calculator – Safe Usable Capacity & Node Failure Planning</title>
+
+<meta name="description" content="Conservative Ceph storage calculator that estimates safe usable capacity while tolerating the failure of the largest node. Models worst-case replication recovery.">
+    <meta name="robots" content="follow, index"/>
+    <link rel="canonical" href="https://vpod.ai/" />
+
+<style>
+body {
+  font-family: Arial, sans-serif;
+  background: #f3f3f3;
+  display: flex;
+  justify-content: center;
+  padding: 20px;
+}
+
+.container {
+  background: #fff;
+  padding: 20px;
+  border-radius: 10px;
+  box-shadow: 0 0 10px #aaa;
+  max-width: 960px;
+  width: 100%;
+}
+
+input {
+  margin: 5px 0;
+  padding: 5px;
+  width: 90px;
+}
+
+button {
+  padding: 6px 12px;
+  margin: 5px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 10px;
+}
+
+th, td {
+  border: 1px solid #ccc;
+  padding: 6px;
+  text-align: center;
+}
+
+.results {
+  margin-top: 20px;
+  background: #eef;
+  padding: 10px;
+  border-radius: 5px;
+}
+
+section {
+  margin-top: 40px;
+}
+
+section h2 {
+  border-bottom: 2px solid #ddd;
+  padding-bottom: 6px;
+}
+
+ul {
+  margin-left: 20px;
+}
+</style>
+
+<!-- FAQ Schema -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "How much usable storage does Ceph provide?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Usable storage depends on replication, node count, and available recovery headroom. This calculator estimates a conservative safe value rather than a theoretical maximum."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Why is usable Ceph storage lower than raw capacity?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Replication overhead and reserved free space for recovery reduce usable capacity. Larger nodes further increase required recovery headroom."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "What happens when a Ceph node fails?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Ceph marks affected placement groups as degraded and begins re-replicating missing objects to restore the configured replica count, assuming enough free space exists."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "What is a safe OSD utilization level in Ceph?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "There is no single universal number. This calculator estimates a maximum utilization level that still allows recovery under the modeled failure scenario."
+      }
+    }
+  ]
+}
+</script>
+</head>
+
+<body>
+<div class="container">
+
+<h1>Ceph Storage Calculator</h1>
+
+<p>
+This Ceph storage calculator estimates how much data can be safely stored in a replicated Ceph cluster while still tolerating the failure of the largest node. It is useful for environments where Ceph is deployed as <a href="https://stonefly.com/s3-object-storage/" target="_blank"><strong>S3 compatible storage</strong></a> for backup, analytics, or application workloads.
+</p>
+
+<p>
+Unlike simple “raw capacity ÷ replication factor” calculations, this calculator models a worst-case recovery scenario. It assumes that if the largest node fails, the remaining nodes must have enough free space to fully re-replicate its data without running out of capacity during recovery.
+</p>
+
+<p>
+The goal of this calculator is capacity safety, not maximum efficiency. The results are intentionally conservative and are designed to help with planning, not promises.
+</p>
+
+<hr>
+
+<!-- ================= CALCULATOR ================= -->
+
+<div>
+  <label>Number of Replicas:</label>
+  <input id="replicas" type="number" value="2" min="1">
+</div>
+
+<div>
+  <label>Units:</label>
+  <input id="units" type="text" value="TB">
+</div>
+
+<h3>Nodes</h3>
+
+<table id="nodesTable">
+<tr>
+  <th>Node Name</th>
+  <th>Total OSD Size</th>
+</tr>
+<tr>
+  <td>Node 1</td>
+  <td><input type="number" value="1"></td>
+</tr>
+<tr>
+  <td>Node 2</td>
+  <td><input type="number" value="1"></td>
+</tr>
+<tr>
+  <td>Node 3</td>
+  <td><input type="number" value="1"></td>
+</tr>
+</table>
+
+<button onclick="addNode()">Add Node</button>
+<button onclick="calculate()">Calculate</button>
+
+<div class="results" id="results"></div>
+
+<!-- ================= FULL CONTENT ================= -->
+
+<section>
+<h2>What This Ceph Storage Calculator Does</h2>
+
+<p>
+It estimates safe usable storage capacity for a Ceph cluster under strict assumptions.
+</p>
+
+<p><strong>Specifically, it answers the question:</strong></p>
+
+<p>
+How much data can I store while still guaranteeing that my cluster can recover from the failure of the largest node without hitting a full condition?
+</p>
+
+<p>The calculator models:</p>
+<ul>
+  <li>A single node failure</li>
+  <li>Loss of the largest node in the cluster</li>
+  <li>Replicated pools (not erasure coding)</li>
+  <li>Full re-replication after failure</li>
+  <li>No additional failures during recovery</li>
+</ul>
+
+<p>
+If these conditions can be satisfied, the reported capacity is considered “safe” from a storage-space perspective.
+</p>
+</section>
+
+<section>
+<h2>Assumptions Behind the Ceph Calculator</h2>
+
+<h3>Replication Model</h3>
+<ul>
+  <li>Only replicated pools are modeled</li>
+  <li>The pool replication size defines how many copies exist</li>
+  <li>Replicas are assumed to be placed on different nodes</li>
+  <li>Proper CRUSH failure-domain configuration is assumed</li>
+</ul>
+
+<p>
+Erasure-coded pools are not included due to their different recovery and space behavior.
+</p>
+
+<h3>Failure Scenario Modeled</h3>
+<ul>
+  <li>Exactly one node fails</li>
+  <li>The largest node fails</li>
+  <li>No disks or nodes fail during recovery</li>
+  <li>Recovery must complete successfully</li>
+</ul>
+
+<h3>Capacity Safety Model</h3>
+<ul>
+  <li>Remaining nodes must have enough free space to absorb all missing replicas</li>
+  <li>Re-replication must complete without hitting full or backfill-blocked states</li>
+  <li>Temporary degraded operation may or may not be allowed</li>
+</ul>
+
+<p>
+This models space safety only, not performance or recovery speed.
+</p>
+</section>
+
+<section>
+<h2>Settings Explained</h2>
+
+<h3>Accept Degraded PGs</h3>
+<p>
+When enabled, the calculator allows placement groups to enter a degraded state after a failure.
+</p>
+<ul>
+  <li>Assumes temporary reduced redundancy</li>
+  <li>Full replication may be restored later</li>
+</ul>
+
+<p>
+When disabled, enough free space must exist to immediately restore full replication.
+</p>
+
+<h3>Define Each Node Manually</h3>
+<p>
+Allows specifying raw capacity per node individually for uneven or unbalanced clusters.
+</p>
+
+<h3>Capacity per Node</h3>
+<ul>
+  <li>Total raw storage capacity per node</li>
+  <li>All OSDs are usable</li>
+  <li>CRUSH weights proportional to disk size</li>
+  <li>No distinction between drive types</li>
+</ul>
+
+<h3>Total Node Count</h3>
+<p>
+Determines replica distribution and recovery feasibility. Small node counts significantly reduce safe capacity.
+</p>
+
+<h3>Number of Replicas</h3>
+<ul>
+  <li>Size = 1 → no redundancy</li>
+  <li>Size = 2 → limited fault tolerance</li>
+  <li>Size = 3 → common production default</li>
+</ul>
+</section>
+
+<section>
+<h2>Understanding Results</h2>
+
+<h3>Raw Storage</h3>
+<p>
+Raw Storage = Capacity per Node × Total Node Count
+</p>
+
+<h3>Safe Storage Size</h3>
+<p>
+Maximum amount of data that can be stored while still allowing the cluster to recover from the modeled node failure.
+</p>
+
+<h3>Safe Storage Efficiency</h3>
+<p>
+Safe storage expressed as a percentage of raw storage.
+</p>
+
+<h3>OSD Nearfull Ratio</h3>
+<p>
+Estimated maximum OSD utilization that still allows full re-replication.
+</p>
+</section>
+
+<section>
+<h2>Why Larger Nodes Reduce Safe Ceph Storage Efficiency</h2>
+<ul>
+  <li>Increases raw cluster capacity</li>
+  <li>Increases the amount of data lost when a node fails</li>
+  <li>Requires more free space for re-replication</li>
+</ul>
+</section>
+
+<section>
+<h2>Limitations</h2>
+<ul>
+  <li>Multiple simultaneous failures</li>
+  <li>Recovery throttling</li>
+  <li>Uneven OSD utilization</li>
+  <li>Device classes or WAL/DB separation</li>
+  <li>Network bandwidth or latency</li>
+  <li>Recovery time estimation</li>
+  <li>min_size behavior</li>
+  <li>Monitor quorum or availability</li>
+</ul>
+</section>
+
+<section>
+<h2>FAQs</h2>
+
+<h3>How much usable storage does Ceph provide?</h3>
+<p>
+Usable storage depends on replication, node count, and recovery headroom.
+</p>
+
+<h3>Why is usable Ceph storage lower than raw capacity?</h3>
+<p>
+Replication overhead and reserved recovery space reduce usable capacity.
+</p>
+
+<h3>What happens when a Ceph node fails?</h3>
+<p>
+Ceph re-replicates missing objects if sufficient free space exists.
+</p>
+
+<h3>What is a safe OSD utilization level?</h3>
+<p>
+There is no universal value; this calculator estimates a conservative safe level.
+</p>
+</section>
+
+</div>
+
+<script>
+function addNode() {
+  const table = document.getElementById('nodesTable');
+  const rowCount = table.rows.length;
+  const row = table.insertRow();
+  row.insertCell(0).innerText = `Node ${rowCount}`;
+  row.insertCell(1).innerHTML = `<input type="number" value="0">`;
+}
+
+function calculate() {
+  const replicas = Number(document.getElementById('replicas').value);
+  const units = document.getElementById('units').value;
+
+  const table = document.getElementById('nodesTable');
+  let nodeSizes = [];
+
+  for (let i = 1; i < table.rows.length; i++) {
+    nodeSizes.push(Number(table.rows[i].cells[1].children[0].value));
+  }
+
+  const totalCluster = nodeSizes.reduce((a, b) => a + b, 0);
+  const worstFailure = Math.max(...nodeSizes);
+  const riskyCluster = totalCluster / replicas;
+  const safeCluster = (totalCluster - worstFailure) / replicas;
+
+  document.getElementById('results').innerHTML = `
+    <b>Total Raw Storage:</b> ${totalCluster} ${units}<br>
+    <b>Largest Node:</b> ${worstFailure} ${units}<br>
+    <b>Risky Usable Storage:</b> ${riskyCluster.toFixed(2)} ${units}<br>
+    <b>Safe Usable Storage:</b> ${safeCluster.toFixed(2)} ${units}<br>
+    <b>Safe Efficiency:</b> ${(safeCluster / totalCluster * 100).toFixed(0)}%<br>
+    <b>Safe Nearfull Ratio:</b> ${(safeCluster / totalCluster).toFixed(2)}
+  `;
+}
+</script>
+
+</body>
+</html>
